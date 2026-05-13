@@ -2,6 +2,7 @@ services:
   - type: web
     name: dart-scorer-backend
     runtime: docker
+    branch: master
     dockerfilePath: ./Dockerfile
     autoDeploy: true
     healthCheckPath: /actuator/health
