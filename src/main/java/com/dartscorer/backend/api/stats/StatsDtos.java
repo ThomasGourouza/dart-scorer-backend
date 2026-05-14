@@ -25,6 +25,9 @@ public final class StatsDtos {
       long gamesPlayed,
       long wins,
       double winRate,
+      long firstPlayerGamesPlayed,
+      long firstPlayerWins,
+      double firstPlayerWinRate,
       long totalThrows,
       long totalRounds,
       long totalDelta,
@@ -33,7 +36,7 @@ public final class StatsDtos {
       double averageRoundsPerGame,
       long missCount,
       double missRate,
-      long tonPlusCount,
+      long tonPlusRoundCount,
       double avgFirstThreeRoundsPoints,
       Integer bestRoundPoints,
       Integer bestCheckout,
@@ -42,4 +45,16 @@ public final class StatsDtos {
       List<PlayerVariantBreakdownDto> perVariant,
       OffsetDateTime firstPlayedAt,
       OffsetDateTime lastPlayedAt) {}
+
+  public record PlayerCompareDto(
+      String playerName,
+      long gamesPlayed,
+      long wins,
+      double winRate,
+      double averageDeltaPerThrow,
+      Integer bestCheckout,
+      long tonPlusRoundCount,
+      String dominantColor) {}
+
+  public record PlayersCompareDto(List<PlayerCompareDto> players) {}
 }

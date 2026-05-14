@@ -1,9 +1,11 @@
 package com.dartscorer.backend.service;
 
+import com.dartscorer.backend.api.stats.StatsDtos.PlayerCompareDto;
 import com.dartscorer.backend.api.stats.StatsDtos.PlayerFavoriteSectorDto;
 import com.dartscorer.backend.api.stats.StatsDtos.PlayerStatsDto;
 import com.dartscorer.backend.api.stats.StatsDtos.PlayerSummaryDto;
 import com.dartscorer.backend.api.stats.StatsDtos.PlayerVariantBreakdownDto;
+import com.dartscorer.backend.api.stats.StatsDtos.PlayersCompareDto;
 import com.dartscorer.backend.api.stats.StatsDtos.PlayersListDto;
 import java.sql.Timestamp;
 import java.time.LocalDate;
@@ -51,6 +53,87 @@ public class StatsQueryService {
   }
 
   @Transactional(readOnly = true)
+  public PlayersCompareDto listComparePlayers() {
+    String sql =
+        "WITH base AS ("
+            + " SELECT LOWER(TRIM(p.player_name)) AS norm_name,"
+            + " p.id AS player_id, p.game_id, p.winner, p.player_name"
+            + " FROM players p"
+            + " WHERE TRIM(p.player_name) <> ''"
+            + "),"
+            + " agg AS ("
+            + " SELECT norm_name,"
+            + " MAX(TRIM(player_name)) AS display_name,"
+            + " COUNT(DISTINCT game_id) AS games_played,"
+            + " COUNT(*) FILTER (WHERE winner = TRUE) AS wins"
+            + " FROM base GROUP BY norm_name"
+            + " ),"
+            + " throws_agg AS ("
+            + " SELECT b.norm_name,"
+            + " COALESCE(SUM(t.delta), 0) AS total_delta,"
+            + " COUNT(t.id) AS total_throws"
+            + " FROM base b"
+            + " JOIN rounds r ON r.player_id = b.player_id"
+            + " JOIN throws t ON t.round_id = r.id"
+            + " GROUP BY b.norm_name"
+            + " ),"
+            + " checkout_agg AS ("
+            + " SELECT b.norm_name, MAX(r.score_before) AS best_checkout"
+            + " FROM base b JOIN rounds r ON r.player_id = b.player_id"
+            + " WHERE r.score_after = 0"
+            + " GROUP BY b.norm_name"
+            + " ),"
+            + " ton_agg AS ("
+            + " SELECT b.norm_name, COUNT(*) AS ton_plus_round_count"
+            + " FROM base b JOIN rounds r ON r.player_id = b.player_id"
+            + " WHERE (r.score_before - r.score_after) >= 100"
+            + " GROUP BY b.norm_name"
+            + " ),"
+            + " color_counts AS ("
+            + " SELECT LOWER(TRIM(player_name)) AS norm_name, color, COUNT(*) AS hits"
+            + " FROM players"
+            + " WHERE TRIM(player_name) <> ''"
+            + " GROUP BY norm_name, color"
+            + " ),"
+            + " color_ranked AS ("
+            + " SELECT norm_name, color,"
+            + " ROW_NUMBER() OVER (PARTITION BY norm_name ORDER BY hits DESC, color ASC) AS rn"
+            + " FROM color_counts"
+            + " )"
+            + " SELECT a.display_name, a.games_played, a.wins,"
+            + " COALESCE(ta.total_delta, 0)  AS total_delta,"
+            + " COALESCE(ta.total_throws, 0) AS total_throws,"
+            + " ca.best_checkout,"
+            + " COALESCE(tg.ton_plus_round_count, 0) AS ton_plus_round_count,"
+            + " cl.color AS dominant_color"
+            + " FROM agg a"
+            + " LEFT JOIN throws_agg   ta ON ta.norm_name = a.norm_name"
+            + " LEFT JOIN checkout_agg ca ON ca.norm_name = a.norm_name"
+            + " LEFT JOIN ton_agg      tg ON tg.norm_name = a.norm_name"
+            + " LEFT JOIN color_ranked cl ON cl.norm_name = a.norm_name AND cl.rn = 1"
+            + " ORDER BY a.games_played DESC, a.display_name ASC";
+
+    List<PlayerCompareDto> rows =
+        jdbc.query(
+            sql,
+            (rs, i) -> {
+              String name = rs.getString("display_name");
+              long games = rs.getLong("games_played");
+              long wins = rs.getLong("wins");
+              long totalDelta = rs.getLong("total_delta");
+              long totalThrows = rs.getLong("total_throws");
+              Integer bestCheckout = (Integer) rs.getObject("best_checkout");
+              long tonPlus = rs.getLong("ton_plus_round_count");
+              String color = rs.getString("dominant_color");
+              double winRate = StatsCalculations.rate(wins, games);
+              double avgDelta = StatsCalculations.average(totalDelta, totalThrows);
+              return new PlayerCompareDto(
+                  name, games, wins, winRate, avgDelta, bestCheckout, tonPlus, color);
+            });
+    return new PlayersCompareDto(rows);
+  }
+
+  @Transactional(readOnly = true)
   public PlayerStatsDto getPlayerStats(
       String rawPlayerName, String fromIsoDate, String toIsoDate, Integer variant) {
     String name = rawPlayerName == null ? "" : rawPlayerName.trim();
@@ -74,6 +157,8 @@ public class StatsQueryService {
     }
 
     ThrowAggregates ta = loadThrowAggregates(filterSql, filterParams);
+    long tonPlusRounds = loadTonPlusRoundCount(filterSql, filterParams);
+    FirstPlayerAggregates fpa = loadFirstPlayerAggregates(filterSql, filterParams);
     PlayerFavoriteSectorDto favorite = loadFavoriteSector(filterSql, filterParams);
     Integer bestRound = loadBestRound(filterSql, filterParams);
     Integer bestCheckout = loadBestCheckout(filterSql, filterParams);
@@ -82,6 +167,8 @@ public class StatsQueryService {
     List<PlayerVariantBreakdownDto> perVariant = loadVariantBreakdown(filterSql, filterParams);
 
     double winRate = StatsCalculations.rate(ga.wins, ga.gamesPlayed);
+    double firstPlayerWinRate =
+        StatsCalculations.rate(fpa.firstPlayerWins, fpa.firstPlayerGamesPlayed);
     double avgDelta = StatsCalculations.average(ta.totalDelta, ta.totalThrows);
     double avgThrowsPerGame = StatsCalculations.average(ta.totalThrows, ga.gamesPlayed);
     double avgRoundsPerGame = StatsCalculations.average(ta.totalRounds, ga.gamesPlayed);
@@ -92,6 +179,9 @@ public class StatsQueryService {
         ga.gamesPlayed,
         ga.wins,
         winRate,
+        fpa.firstPlayerGamesPlayed,
+        fpa.firstPlayerWins,
+        firstPlayerWinRate,
         ta.totalThrows,
         ta.totalRounds,
         ta.totalDelta,
@@ -100,7 +190,7 @@ public class StatsQueryService {
         avgRoundsPerGame,
         ta.missCount,
         missRate,
-        ta.tonPlusCount,
+        tonPlusRounds,
         avgFirstThree,
         bestRound,
         bestCheckout,
@@ -158,8 +248,7 @@ public class StatsQueryService {
             + " SELECT (SELECT COUNT(*) FROM rounds_filtered) AS total_rounds,"
             + " (SELECT COUNT(*) FROM throws_filtered) AS total_throws,"
             + " (SELECT COALESCE(SUM(delta), 0) FROM throws_filtered) AS total_delta,"
-            + " (SELECT COUNT(*) FROM throws_filtered WHERE base = 0) AS miss_count,"
-            + " (SELECT COUNT(*) FROM throws_filtered WHERE delta >= 50) AS ton_plus_count";
+            + " (SELECT COUNT(*) FROM throws_filtered WHERE base = 0) AS miss_count";
 
     return jdbc.queryForObject(
         sql,
@@ -168,8 +257,43 @@ public class StatsQueryService {
                 rs.getLong("total_rounds"),
                 rs.getLong("total_throws"),
                 rs.getLong("total_delta"),
-                rs.getLong("miss_count"),
-                rs.getLong("ton_plus_count")),
+                rs.getLong("miss_count")),
+        filterParams.toArray());
+  }
+
+  private long loadTonPlusRoundCount(String filterSql, List<Object> filterParams) {
+    String sql =
+        "WITH player_rows AS ("
+            + " SELECT p.id AS player_id FROM players p"
+            + " JOIN games g ON g.id = p.game_id"
+            + " WHERE "
+            + filterSql
+            + ")"
+            + " SELECT COUNT(*) AS ton_plus_round_count"
+            + " FROM rounds r"
+            + " JOIN player_rows pr ON pr.player_id = r.player_id"
+            + " WHERE (r.score_before - r.score_after) >= 100";
+    Long val =
+        jdbc.queryForObject(
+            sql, (rs, i) -> rs.getLong("ton_plus_round_count"), filterParams.toArray());
+    return val == null ? 0L : val;
+  }
+
+  private FirstPlayerAggregates loadFirstPlayerAggregates(
+      String filterSql, List<Object> filterParams) {
+    String sql =
+        "WITH player_rows AS ("
+            + " SELECT p.player_index, p.winner FROM players p"
+            + " JOIN games g ON g.id = p.game_id"
+            + " WHERE "
+            + filterSql
+            + ")"
+            + " SELECT COUNT(*) FILTER (WHERE player_index = 1) AS first_games,"
+            + " COUNT(*) FILTER (WHERE player_index = 1 AND winner = TRUE) AS first_wins"
+            + " FROM player_rows";
+    return jdbc.queryForObject(
+        sql,
+        (rs, i) -> new FirstPlayerAggregates(rs.getLong("first_games"), rs.getLong("first_wins")),
         filterParams.toArray());
   }
 
@@ -368,8 +492,16 @@ public class StatsQueryService {
 
   private PlayerStatsDto emptyStats(String displayName) {
     return new PlayerStatsDto(
-        displayName, 0L, 0L, 0.0, 0L, 0L, 0L, 0.0, 0.0, 0.0, 0L, 0.0, 0L, 0.0, null, null, null,
-        0, List.of(), null, null);
+        displayName,
+        0L, 0L, 0.0,
+        0L, 0L, 0.0,
+        0L, 0L, 0L, 0.0, 0.0, 0.0,
+        0L, 0.0,
+        0L, 0.0,
+        null, null, null,
+        0,
+        List.of(),
+        null, null);
   }
 
   private record GameAggregates(
@@ -379,9 +511,7 @@ public class StatsQueryService {
       OffsetDateTime lastPlayedAt) {}
 
   private record ThrowAggregates(
-      long totalRounds,
-      long totalThrows,
-      long totalDelta,
-      long missCount,
-      long tonPlusCount) {}
+      long totalRounds, long totalThrows, long totalDelta, long missCount) {}
+
+  private record FirstPlayerAggregates(long firstPlayerGamesPlayed, long firstPlayerWins) {}
 }

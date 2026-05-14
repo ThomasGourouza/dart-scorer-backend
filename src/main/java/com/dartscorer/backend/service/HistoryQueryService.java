@@ -7,8 +7,10 @@ import com.dartscorer.backend.api.history.HistoryDtos.GameListPlayerDto;
 import com.dartscorer.backend.api.history.HistoryDtos.GameRoundDto;
 import com.dartscorer.backend.api.history.HistoryDtos.GameThrowDto;
 import java.sql.Timestamp;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -31,23 +33,72 @@ public class HistoryQueryService {
   }
 
   @Transactional(readOnly = true)
-  public GameListPageDto listGames(int page, int pageSize) {
+  public GameListPageDto listGames(
+      int page,
+      int pageSize,
+      String sort,
+      String dir,
+      String fromIsoDate,
+      String toIsoDate,
+      String winnerLike,
+      String playerLike,
+      Integer minDurationMinutes,
+      Integer maxDurationMinutes,
+      Integer minRounds,
+      Integer maxRounds) {
     int safePage = Math.max(page, 0);
     int safeSize = Math.max(1, Math.min(pageSize, 100));
     int offset = safePage * safeSize;
 
-    Long totalBoxed = jdbc.queryForObject("SELECT COUNT(*) FROM games", Long.class);
+    String sortColumn = resolveSortColumn(sort);
+    String sortDir = resolveSortDir(dir);
+
+    OffsetDateTime fromDateTime = parseStartOfDay(fromIsoDate);
+    OffsetDateTime toDateTime = parseEndOfDay(toIsoDate);
+    Long minDurationSeconds = minutesToSeconds(minDurationMinutes);
+    Long maxDurationSeconds = minutesToSeconds(maxDurationMinutes);
+    String winnerPattern = toLikePattern(winnerLike);
+    String playerPattern = toLikePattern(playerLike);
+
+    StringBuilder where = new StringBuilder();
+    List<Object> whereParams = new ArrayList<>();
+    appendFilters(
+        where,
+        whereParams,
+        fromDateTime,
+        toDateTime,
+        winnerPattern,
+        playerPattern,
+        minDurationSeconds,
+        maxDurationSeconds,
+        minRounds,
+        maxRounds);
+
+    String aggCte = AGG_CTE_SQL;
+    String whereClause = where.length() == 0 ? "" : " WHERE " + where;
+
+    String countSql = aggCte + " SELECT COUNT(*) FROM agg" + whereClause;
+    Long totalBoxed = jdbc.queryForObject(countSql, Long.class, whereParams.toArray());
     long total = totalBoxed == null ? 0L : totalBoxed;
     if (total == 0L) {
       return new GameListPageDto(List.of(), 0L, safePage, safeSize);
     }
 
+    String idsSql =
+        aggCte
+            + " SELECT id FROM agg"
+            + whereClause
+            + " ORDER BY "
+            + sortColumn
+            + " "
+            + sortDir
+            + ", id"
+            + " LIMIT ? OFFSET ?";
+    List<Object> idsParams = new ArrayList<>(whereParams);
+    idsParams.add(safeSize);
+    idsParams.add(offset);
     List<UUID> gameIds =
-        jdbc.query(
-            "SELECT id FROM games ORDER BY date_time DESC, id LIMIT ? OFFSET ?",
-            (rs, i) -> (UUID) rs.getObject(1),
-            safeSize,
-            offset);
+        jdbc.query(idsSql, (rs, i) -> (UUID) rs.getObject(1), idsParams.toArray());
 
     if (gameIds.isEmpty()) {
       return new GameListPageDto(List.of(), total, safePage, safeSize);
@@ -245,6 +296,145 @@ public class HistoryQueryService {
       sb.append('?');
     }
     return sb.toString();
+  }
+
+  // Per-game aggregate CTE: every column the list endpoint sorts or filters on
+  // is materialized here so we can WHERE / ORDER BY / paginate uniformly.
+  private static final String AGG_CTE_SQL =
+      "WITH agg AS ("
+          + " SELECT g.id, g.date_time,"
+          + " COALESCE(r.rounds_count, 0) AS rounds_count,"
+          + " COALESCE(t.throws_count, 0) AS throws_count,"
+          + " COALESCE("
+          + " GREATEST(0, EXTRACT(EPOCH FROM (t.max_thrown_at - t.min_thrown_at)))::BIGINT,"
+          + " 0"
+          + " ) AS duration_seconds,"
+          + " COALESCE(pl.players_count, 0) AS players_count,"
+          + " w.winner_name"
+          + " FROM games g"
+          + " LEFT JOIN ("
+          + " SELECT game_id, COUNT(*) AS rounds_count FROM rounds GROUP BY game_id"
+          + " ) r ON r.game_id = g.id"
+          + " LEFT JOIN ("
+          + " SELECT r2.game_id,"
+          + " COUNT(t.*) AS throws_count,"
+          + " MIN(t.date_time) AS min_thrown_at,"
+          + " MAX(t.date_time) AS max_thrown_at"
+          + " FROM throws t JOIN rounds r2 ON r2.id = t.round_id"
+          + " GROUP BY r2.game_id"
+          + " ) t ON t.game_id = g.id"
+          + " LEFT JOIN ("
+          + " SELECT game_id, COUNT(*) AS players_count FROM players GROUP BY game_id"
+          + " ) pl ON pl.game_id = g.id"
+          + " LEFT JOIN ("
+          + " SELECT game_id, MIN(TRIM(player_name)) AS winner_name"
+          + " FROM players WHERE winner = TRUE GROUP BY game_id"
+          + " ) w ON w.game_id = g.id"
+          + " )";
+
+  // Whitelist mapping sort key -> SQL fragment. Prevents SQL injection on `sort`.
+  private static final Map<String, String> SORT_COLUMNS =
+      Map.of(
+          "date", "date_time",
+          "duration", "duration_seconds",
+          "rounds", "rounds_count",
+          "throws", "throws_count",
+          "players", "players_count",
+          "winner", "LOWER(COALESCE(winner_name, ''))");
+
+  private static String resolveSortColumn(String sort) {
+    if (sort == null) return SORT_COLUMNS.get("date");
+    String key = sort.trim().toLowerCase();
+    return SORT_COLUMNS.getOrDefault(key, SORT_COLUMNS.get("date"));
+  }
+
+  private static String resolveSortDir(String dir) {
+    if (dir != null && "asc".equalsIgnoreCase(dir.trim())) return "ASC";
+    return "DESC";
+  }
+
+  private static OffsetDateTime parseStartOfDay(String iso) {
+    if (iso == null || iso.isBlank()) return null;
+    try {
+      return LocalDate.parse(iso).atStartOfDay().atOffset(ZoneOffset.UTC);
+    } catch (DateTimeParseException ex) {
+      return null;
+    }
+  }
+
+  private static OffsetDateTime parseEndOfDay(String iso) {
+    if (iso == null || iso.isBlank()) return null;
+    try {
+      return LocalDate.parse(iso).plusDays(1).atStartOfDay().minusNanos(1).atOffset(ZoneOffset.UTC);
+    } catch (DateTimeParseException ex) {
+      return null;
+    }
+  }
+
+  private static Long minutesToSeconds(Integer minutes) {
+    if (minutes == null) return null;
+    if (minutes < 0) return 0L;
+    return minutes.longValue() * 60L;
+  }
+
+  private static String toLikePattern(String value) {
+    if (value == null) return null;
+    String trimmed = value.trim();
+    if (trimmed.isEmpty()) return null;
+    return "%" + trimmed.toLowerCase() + "%";
+  }
+
+  private static void appendFilters(
+      StringBuilder where,
+      List<Object> params,
+      OffsetDateTime fromDateTime,
+      OffsetDateTime toDateTime,
+      String winnerPattern,
+      String playerPattern,
+      Long minDurationSeconds,
+      Long maxDurationSeconds,
+      Integer minRounds,
+      Integer maxRounds) {
+    if (fromDateTime != null) {
+      appendAnd(where, "agg.date_time >= ?");
+      params.add(Timestamp.from(fromDateTime.toInstant()));
+    }
+    if (toDateTime != null) {
+      appendAnd(where, "agg.date_time <= ?");
+      params.add(Timestamp.from(toDateTime.toInstant()));
+    }
+    if (winnerPattern != null) {
+      appendAnd(where, "LOWER(TRIM(COALESCE(agg.winner_name, ''))) LIKE ?");
+      params.add(winnerPattern);
+    }
+    if (playerPattern != null) {
+      appendAnd(
+          where,
+          "EXISTS (SELECT 1 FROM players p WHERE p.game_id = agg.id"
+              + " AND LOWER(TRIM(p.player_name)) LIKE ?)");
+      params.add(playerPattern);
+    }
+    if (minDurationSeconds != null) {
+      appendAnd(where, "agg.duration_seconds >= ?");
+      params.add(minDurationSeconds);
+    }
+    if (maxDurationSeconds != null) {
+      appendAnd(where, "agg.duration_seconds <= ?");
+      params.add(maxDurationSeconds);
+    }
+    if (minRounds != null) {
+      appendAnd(where, "agg.rounds_count >= ?");
+      params.add(minRounds);
+    }
+    if (maxRounds != null) {
+      appendAnd(where, "agg.rounds_count <= ?");
+      params.add(maxRounds);
+    }
+  }
+
+  private static void appendAnd(StringBuilder where, String clause) {
+    if (where.length() > 0) where.append(" AND ");
+    where.append(clause);
   }
 
   private record GameListAggregate(

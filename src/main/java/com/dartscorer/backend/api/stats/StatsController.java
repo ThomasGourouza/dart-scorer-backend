@@ -1,6 +1,7 @@
 package com.dartscorer.backend.api.stats;
 
 import com.dartscorer.backend.api.stats.StatsDtos.PlayerStatsDto;
+import com.dartscorer.backend.api.stats.StatsDtos.PlayersCompareDto;
 import com.dartscorer.backend.api.stats.StatsDtos.PlayersListDto;
 import com.dartscorer.backend.service.StatsQueryService;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -22,6 +23,11 @@ public class StatsController {
   @GetMapping("/players")
   public PlayersListDto listPlayers() {
     return statsQueryService.listPlayers();
+  }
+
+  @GetMapping("/compare")
+  public PlayersCompareDto compare() {
+    return statsQueryService.listComparePlayers();
   }
 
   @GetMapping("/players/{playerName}")

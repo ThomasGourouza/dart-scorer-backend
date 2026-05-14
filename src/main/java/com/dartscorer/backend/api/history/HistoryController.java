@@ -25,8 +25,30 @@ public class HistoryController {
   @GetMapping("/games")
   public GameListPageDto listGames(
       @RequestParam(value = "page", defaultValue = "0") int page,
-      @RequestParam(value = "pageSize", defaultValue = "20") int pageSize) {
-    return historyQueryService.listGames(page, pageSize);
+      @RequestParam(value = "pageSize", defaultValue = "20") int pageSize,
+      @RequestParam(value = "sort", defaultValue = "date") String sort,
+      @RequestParam(value = "dir", defaultValue = "desc") String dir,
+      @RequestParam(value = "from", required = false) String from,
+      @RequestParam(value = "to", required = false) String to,
+      @RequestParam(value = "winner", required = false) String winner,
+      @RequestParam(value = "player", required = false) String player,
+      @RequestParam(value = "minDuration", required = false) Integer minDurationMinutes,
+      @RequestParam(value = "maxDuration", required = false) Integer maxDurationMinutes,
+      @RequestParam(value = "minRounds", required = false) Integer minRounds,
+      @RequestParam(value = "maxRounds", required = false) Integer maxRounds) {
+    return historyQueryService.listGames(
+        page,
+        pageSize,
+        sort,
+        dir,
+        from,
+        to,
+        winner,
+        player,
+        minDurationMinutes,
+        maxDurationMinutes,
+        minRounds,
+        maxRounds);
   }
 
   @GetMapping("/games/{gameId}")
