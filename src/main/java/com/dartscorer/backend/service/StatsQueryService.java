@@ -86,7 +86,7 @@ public class StatsQueryService {
             + " ton_agg AS ("
             + " SELECT b.norm_name, COUNT(*) AS ton_plus_round_count"
             + " FROM base b JOIN rounds r ON r.player_id = b.player_id"
-            + " WHERE (r.score_before - r.score_after) >= 50"
+            + " WHERE (r.score_before - r.score_after) >= 100"
             + " GROUP BY b.norm_name"
             + " ),"
             + " best_round_agg AS ("
@@ -303,7 +303,7 @@ public class StatsQueryService {
             + " SELECT COUNT(*) AS ton_plus_round_count"
             + " FROM rounds r"
             + " JOIN player_rows pr ON pr.player_id = r.player_id"
-            + " WHERE (r.score_before - r.score_after) >= 50";
+            + " WHERE (r.score_before - r.score_after) >= 100";
     Long val =
         jdbc.queryForObject(
             sql, (rs, i) -> rs.getLong("ton_plus_round_count"), filterParams.toArray());
