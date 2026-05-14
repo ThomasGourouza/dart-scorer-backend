@@ -53,6 +53,8 @@ public final class StatsDtos {
       double winRate,
       double averageDeltaPerThrow,
       Integer bestCheckout,
+      Integer bestRound,
+      double firstPlayerWinRate,
       long tonPlusRoundCount,
       String dominantColor) {}
 

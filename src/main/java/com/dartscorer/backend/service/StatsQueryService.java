@@ -86,7 +86,20 @@ public class StatsQueryService {
             + " ton_agg AS ("
             + " SELECT b.norm_name, COUNT(*) AS ton_plus_round_count"
             + " FROM base b JOIN rounds r ON r.player_id = b.player_id"
-            + " WHERE (r.score_before - r.score_after) >= 100"
+            + " WHERE (r.score_before - r.score_after) >= 50"
+            + " GROUP BY b.norm_name"
+            + " ),"
+            + " best_round_agg AS ("
+            + " SELECT b.norm_name, MAX(r.score_before - r.score_after) AS best_round"
+            + " FROM base b JOIN rounds r ON r.player_id = b.player_id"
+            + " WHERE r.score_before >= r.score_after"
+            + " GROUP BY b.norm_name"
+            + " ),"
+            + " first_player_agg AS ("
+            + " SELECT b.norm_name,"
+            + " COUNT(*) FILTER (WHERE p.player_index = 1) AS first_games,"
+            + " COUNT(*) FILTER (WHERE p.player_index = 1 AND p.winner = TRUE) AS first_wins"
+            + " FROM base b JOIN players p ON p.id = b.player_id"
             + " GROUP BY b.norm_name"
             + " ),"
             + " color_counts AS ("
@@ -104,13 +117,18 @@ public class StatsQueryService {
             + " COALESCE(ta.total_delta, 0)  AS total_delta,"
             + " COALESCE(ta.total_throws, 0) AS total_throws,"
             + " ca.best_checkout,"
+            + " br.best_round,"
+            + " COALESCE(fp.first_games, 0) AS first_games,"
+            + " COALESCE(fp.first_wins, 0)  AS first_wins,"
             + " COALESCE(tg.ton_plus_round_count, 0) AS ton_plus_round_count,"
             + " cl.color AS dominant_color"
             + " FROM agg a"
-            + " LEFT JOIN throws_agg   ta ON ta.norm_name = a.norm_name"
-            + " LEFT JOIN checkout_agg ca ON ca.norm_name = a.norm_name"
-            + " LEFT JOIN ton_agg      tg ON tg.norm_name = a.norm_name"
-            + " LEFT JOIN color_ranked cl ON cl.norm_name = a.norm_name AND cl.rn = 1"
+            + " LEFT JOIN throws_agg       ta ON ta.norm_name = a.norm_name"
+            + " LEFT JOIN checkout_agg     ca ON ca.norm_name = a.norm_name"
+            + " LEFT JOIN ton_agg          tg ON tg.norm_name = a.norm_name"
+            + " LEFT JOIN best_round_agg   br ON br.norm_name = a.norm_name"
+            + " LEFT JOIN first_player_agg fp ON fp.norm_name = a.norm_name"
+            + " LEFT JOIN color_ranked     cl ON cl.norm_name = a.norm_name AND cl.rn = 1"
             + " ORDER BY a.games_played DESC, a.display_name ASC";
 
     List<PlayerCompareDto> rows =
@@ -123,12 +141,25 @@ public class StatsQueryService {
               long totalDelta = rs.getLong("total_delta");
               long totalThrows = rs.getLong("total_throws");
               Integer bestCheckout = (Integer) rs.getObject("best_checkout");
+              Integer bestRound = (Integer) rs.getObject("best_round");
+              long firstGames = rs.getLong("first_games");
+              long firstWins = rs.getLong("first_wins");
               long tonPlus = rs.getLong("ton_plus_round_count");
               String color = rs.getString("dominant_color");
               double winRate = StatsCalculations.rate(wins, games);
               double avgDelta = StatsCalculations.average(totalDelta, totalThrows);
+              double firstWinRate = StatsCalculations.rate(firstWins, firstGames);
               return new PlayerCompareDto(
-                  name, games, wins, winRate, avgDelta, bestCheckout, tonPlus, color);
+                  name,
+                  games,
+                  wins,
+                  winRate,
+                  avgDelta,
+                  bestCheckout,
+                  bestRound,
+                  firstWinRate,
+                  tonPlus,
+                  color);
             });
     return new PlayersCompareDto(rows);
   }
@@ -272,7 +303,7 @@ public class StatsQueryService {
             + " SELECT COUNT(*) AS ton_plus_round_count"
             + " FROM rounds r"
             + " JOIN player_rows pr ON pr.player_id = r.player_id"
-            + " WHERE (r.score_before - r.score_after) >= 100";
+            + " WHERE (r.score_before - r.score_after) >= 50";
     Long val =
         jdbc.queryForObject(
             sql, (rs, i) -> rs.getLong("ton_plus_round_count"), filterParams.toArray());
